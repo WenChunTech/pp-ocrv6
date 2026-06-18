@@ -2,6 +2,41 @@ import init, { OarOcrWasm } from "/pkg/oar_ocr_wasm.js";
 import * as ort from "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.23.2/dist/ort.webgpu.min.mjs";
 
 export const MODEL_BASE_URL = "/models";
+export const MODEL_REGISTRY = {
+  "pp-ocrv6_medium_det.onnx": {
+    sha256: "eb13b44b25bb36f89528b68720af8a61d9cf381176107f465db1757b65d086e1",
+    size: 62032837,
+  },
+  "pp-ocrv6_medium_rec.onnx": {
+    sha256: "9c09abf0957f7968c7586464b7397b84ad2387a0497a351af40e9acc71b673ba",
+    size: 76554979,
+  },
+  "pp-ocrv6_small_det.onnx": {
+    sha256: "d73e0058b7a8086bbd57f3d10b8bcd4ff95363f67e06e2762b5e814fe9c9410e",
+    size: 9880512,
+  },
+  "pp-ocrv6_small_rec.onnx": {
+    sha256: "5435fd747c9e0efe15a96d0b378d5bd157e9492ed8fd80edf08f30d02fa24634",
+    size: 21159378,
+  },
+  "pp-ocrv6_tiny_det.onnx": {
+    sha256: "193bab7a04fca699a6c82e6abb5b81bdb28177f0abd4062552b04908dafb19f8",
+    size: 1780590,
+  },
+  "pp-ocrv6_tiny_rec.onnx": {
+    sha256: "9ef676d6ed3c88256a2d92c640c44f25b0c40947e111b14b8be8f594091563e6",
+    size: 4462639,
+  },
+  "ppocrv6_dict.txt": {
+    sha256: "b5f2bfe2bdd9448429e3e82b51c789775d9b42f2403d082b00662eb77e401c5d",
+    size: 74947,
+  },
+  "ppocrv6_tiny_dict.txt": {
+    sha256: "c5cbe34ef40c29c4df07ed012bf96569cb69a2d2a01a07027e9f13cb832bd9cd",
+    size: 27156,
+  },
+};
+
 export const MODEL_PRESETS = {
   tiny: {
     label: "PP-OCRv6 tiny",
@@ -45,9 +80,9 @@ export function selectedPreset(model) {
 export function selectedModelUrls(model) {
   const preset = selectedPreset(model);
   return {
-    det: `${MODEL_BASE_URL}/${preset.det}`,
-    rec: `${MODEL_BASE_URL}/${preset.rec}`,
-    dict: `${MODEL_BASE_URL}/${preset.dict}`,
+    det: modelFile(preset.det),
+    rec: modelFile(preset.rec),
+    dict: modelFile(preset.dict),
   };
 }
 
@@ -86,11 +121,13 @@ async function createOcr(model, options) {
   await ensureWasmReady();
 
   const urls = selectedModelUrls(model);
-  const [detSession, recSession, dict] = await Promise.all([
-    createSession(urls.det),
-    createSession(urls.rec),
-    fetchText(urls.dict),
+  const [detModelBytes, recModelBytes, dict] = await Promise.all([
+    fetchVerifiedBytes(urls.det.url, urls.det),
+    fetchVerifiedBytes(urls.rec.url, urls.rec),
+    fetchText(urls.dict.url, urls.dict),
   ]);
+  const detSession = await createSession(detModelBytes);
+  const recSession = await createSession(recModelBytes);
 
   return new OarOcrWasm(wrapOrtSession(detSession), wrapOrtSession(recSession), dict, {
     detInputName: firstInputName(detSession, "x"),
@@ -105,11 +142,16 @@ async function createOcr(model, options) {
 
 async function ensureWasmReady() {
   if (!initPromise) {
-    initPromise = init().then(() => {
-      ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.23.2/dist/";
-    });
+    configureOrtWasm();
+    initPromise = init();
   }
   await initPromise;
+}
+
+function configureOrtWasm() {
+  ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.23.2/dist/";
+  ort.env.wasm.numThreads = 1;
+  ort.env.wasm.proxy = false;
 }
 
 function sanitizeOptions(options) {
@@ -144,27 +186,66 @@ function wrapOrtSession(session) {
   };
 }
 
-async function createSession(url) {
-  const providers = navigator.gpu ? ["webgpu", "wasm"] : ["wasm"];
-  return ort.InferenceSession.create(url, {
-    executionProviders: providers,
+function modelFile(fileName) {
+  const entry = MODEL_REGISTRY[fileName];
+  if (!entry) throw new Error(`未注册模型文件: ${fileName}`);
+  return {
+    fileName,
+    url: `${MODEL_BASE_URL}/${fileName}`,
+    ...entry,
+  };
+}
+
+async function createSession(modelBytes) {
+  if (navigator.gpu) {
+    try {
+      return await createSessionWithProviders(modelBytes, ["webgpu"]);
+    } catch (error) {
+      console.warn("WebGPU 初始化失败，回退到 WASM。", error);
+    }
+  }
+  return createSessionWithProviders(modelBytes, ["wasm"]);
+}
+
+function createSessionWithProviders(modelBytes, executionProviders) {
+  return ort.InferenceSession.create(modelBytes, {
+    executionProviders,
     graphOptimizationLevel: "all",
-  }).catch((error) => {
-    if (!providers.includes("webgpu")) throw error;
-    console.warn("WebGPU 初始化失败，回退到 WASM。", error);
-    return ort.InferenceSession.create(url, {
-      executionProviders: ["wasm"],
-      graphOptimizationLevel: "all",
-    });
   });
 }
 
-async function fetchText(url) {
+async function fetchText(url, expected) {
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error(`无法加载 ${url}: HTTP ${response.status}`);
   }
-  return response.text();
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  await verifyBytes(bytes, expected);
+  return new TextDecoder().decode(bytes);
+}
+
+async function fetchVerifiedBytes(url, expected) {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`无法加载 ${url}: HTTP ${response.status}`);
+  }
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  await verifyBytes(bytes, expected);
+  return bytes;
+}
+
+async function verifyBytes(bytes, expected) {
+  if (bytes.byteLength !== expected.size) {
+    throw new Error(`模型文件 ${expected.fileName} 大小不匹配: ${bytes.byteLength} != ${expected.size}`);
+  }
+
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const hash = [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  if (hash !== expected.sha256) {
+    throw new Error(`模型文件 ${expected.fileName} SHA-256 校验失败`);
+  }
 }
 
 function firstInputName(session, fallback) {

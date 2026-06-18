@@ -12,6 +12,7 @@ const state = {
   ocr: null,
   wasmReady: false,
   selectedModel: "tiny",
+  loadedModel: null,
   file: null,
   imageBitmap: null,
   lastResult: null,
@@ -65,14 +66,17 @@ boot().catch((error) => {
 });
 
 async function boot() {
-  setStatus("status.init.title", "status.init.text", "loading");
   state.wasmReady = true;
-  await loadSelectedModel();
+  setStatus("status.readyToLoad.title", "status.readyToLoad.text", "ready");
+  updateControls();
 }
 
 async function loadSelectedModel() {
+  if (state.ocr && state.loadedModel === state.selectedModel) return state.ocr;
+
   const preset = selectedPreset(state.selectedModel);
   state.ocr = null;
+  state.loadedModel = null;
   state.lastResult = null;
   state.lastElapsedMs = 0;
   elements.resultList.replaceChildren();
@@ -83,28 +87,34 @@ async function loadSelectedModel() {
   updateControls();
 
   setStatus("status.loadingModel.title", "status.loadingModel.text", "loading", { model: preset.label });
-  state.ocr = await getOcr(state.selectedModel, {
+  const ocr = await getOcr(state.selectedModel, {
     detScoreThreshold: 0.2,
     detBoxThreshold: 0.45,
     detUnclipRatio: 1.4,
     recBatchSize: 8,
     dropScore: Number(elements.dropScore.value),
   });
+  state.ocr = ocr;
+  state.loadedModel = state.selectedModel;
 
   setStatus("status.modelReady.title", "status.modelReady.text", "ready", { model: preset.label });
   updateControls();
+  return ocr;
 }
 
-async function handleModelChange(event) {
+function handleModelChange(event) {
   state.selectedModel = normalizeModel(event.target.value);
-  try {
-    await loadSelectedModel();
-  } catch (error) {
-    console.error(error);
-    setStatus("status.failed.title", errorMessage(error), "error");
-  } finally {
-    updateControls();
-  }
+  state.ocr = null;
+  state.loadedModel = null;
+  state.lastResult = null;
+  state.lastElapsedMs = 0;
+  elements.resultList.replaceChildren();
+  elements.emptyResults.hidden = false;
+  elements.emptyResults.textContent = translate("ocr.emptyResults");
+  elements.copyButton.disabled = true;
+  updateModelName();
+  setStatus("status.readyToLoad.title", "status.readyToLoad.text", "ready");
+  updateControls();
 }
 
 function updateModelName() {
@@ -136,16 +146,17 @@ async function handleFileChange(event) {
 }
 
 async function runOcr() {
-  if (!state.ocr || !state.file || state.busy) return;
+  if (!state.file || state.busy) return;
 
   state.busy = true;
   updateControls();
   const startedAt = performance.now();
-  setStatus("status.running.title", "status.running.text", "loading");
 
   try {
+    const ocr = await loadSelectedModel();
+    setStatus("status.running.title", "status.running.text", "loading");
     const bytes = new Uint8Array(await state.file.arrayBuffer());
-    const rawResult = await state.ocr.predictBytes(bytes);
+    const rawResult = await ocr.predictBytes(bytes);
     const result = filterByScore(rawResult, Number(elements.dropScore.value));
     result.raw = rawResult;
     state.lastResult = result;
@@ -253,16 +264,16 @@ function clearAll() {
   elements.copyButton.disabled = true;
   const preset = selectedPreset(state.selectedModel);
   setStatus(
-    state.ocr ? "status.modelReady.title" : "status.loadingFallback.title",
-    state.ocr ? "status.modelReady.text" : "status.loadingFallback.text",
-    state.ocr ? "ready" : "loading",
+    state.ocr ? "status.modelReady.title" : "status.readyToLoad.title",
+    state.ocr ? "status.modelReady.text" : "status.readyToLoad.text",
+    "ready",
     state.ocr ? { model: preset.label } : {},
   );
   updateControls();
 }
 
 function updateControls() {
-  elements.runButton.disabled = !state.ocr || !state.file || state.busy;
+  elements.runButton.disabled = !state.file || state.busy;
   elements.clearButton.disabled = !state.file && !state.lastResult;
   elements.imageInput.disabled = state.busy;
   elements.modelSelect.disabled = !state.wasmReady || state.busy;

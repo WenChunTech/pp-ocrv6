@@ -25,8 +25,44 @@ const runtime = globalThis as typeof globalThis & {
 const app = new Hono();
 const publicRoot = new URL("../public/", import.meta.url);
 const wasmPkgRoot = new URL("pkg/", publicRoot);
-const wasmModelsRoot = new URL("models/", publicRoot);
 const projectAssetsRoot = new URL("assets/", import.meta.url);
+
+const MODELSCOPE_REPO = "greatv/oar-ocr";
+const MODELSCOPE_REVISION = "master";
+const MODEL_REGISTRY = new Map<string, { sha256: string; size: number }>([
+  ["pp-ocrv6_medium_det.onnx", {
+    sha256: "eb13b44b25bb36f89528b68720af8a61d9cf381176107f465db1757b65d086e1",
+    size: 62032837,
+  }],
+  ["pp-ocrv6_medium_rec.onnx", {
+    sha256: "9c09abf0957f7968c7586464b7397b84ad2387a0497a351af40e9acc71b673ba",
+    size: 76554979,
+  }],
+  ["pp-ocrv6_small_det.onnx", {
+    sha256: "d73e0058b7a8086bbd57f3d10b8bcd4ff95363f67e06e2762b5e814fe9c9410e",
+    size: 9880512,
+  }],
+  ["pp-ocrv6_small_rec.onnx", {
+    sha256: "5435fd747c9e0efe15a96d0b378d5bd157e9492ed8fd80edf08f30d02fa24634",
+    size: 21159378,
+  }],
+  ["pp-ocrv6_tiny_det.onnx", {
+    sha256: "193bab7a04fca699a6c82e6abb5b81bdb28177f0abd4062552b04908dafb19f8",
+    size: 1780590,
+  }],
+  ["pp-ocrv6_tiny_rec.onnx", {
+    sha256: "9ef676d6ed3c88256a2d92c640c44f25b0c40947e111b14b8be8f594091563e6",
+    size: 4462639,
+  }],
+  ["ppocrv6_dict.txt", {
+    sha256: "b5f2bfe2bdd9448429e3e82b51c789775d9b42f2403d082b00662eb77e401c5d",
+    size: 74947,
+  }],
+  ["ppocrv6_tiny_dict.txt", {
+    sha256: "c5cbe34ef40c29c4df07ed012bf96569cb69a2d2a01a07027e9f13cb832bd9cd",
+    size: 27156,
+  }],
+]);
 
 app.get("/", (c) => html(c, homePage()));
 app.get("/ocr", (c) => html(c, ocrPage()));
@@ -40,7 +76,7 @@ app.get(
 );
 app.get(
   "/models/:file",
-  async (c) => serveStaticFile(c, wasmModelsRoot, c.req.param("file")),
+  async (c) => proxyModelFile(c, c.req.param("file")),
 );
 
 app.notFound((c) => c.html(renderPage(notFoundPage()), 404));
@@ -91,6 +127,46 @@ async function serveStaticFile(
       "cache-control": cacheControl(fileName, c.req.url),
     },
   });
+}
+
+async function proxyModelFile(c: Context, fileName: string): Promise<Response> {
+  fileName = fileName.split("?")[0] ?? fileName;
+
+  if (!isSafeStaticFileName(fileName)) {
+    return c.text("Bad request", 400);
+  }
+
+  const modelEntry = MODEL_REGISTRY.get(fileName);
+  if (!modelEntry) return c.text("Model not found", 404);
+
+  const remoteResponse = await fetch(modelScopeFileUrl(fileName));
+  if (!remoteResponse.ok || !remoteResponse.body) {
+    return c.text(
+      `Failed to fetch remote model: HTTP ${remoteResponse.status}`,
+      502,
+    );
+  }
+
+  const headers = new Headers({
+    "content-type": contentType(fileName),
+    "cache-control": cacheControl(fileName, c.req.url),
+    "x-model-source": "modelscope:greatv/oar-ocr",
+    "x-model-sha256": modelEntry.sha256,
+    "x-model-size": String(modelEntry.size),
+  });
+
+  return new Response(remoteResponse.body, {
+    status: 200,
+    headers,
+  });
+}
+
+function modelScopeFileUrl(fileName: string): string {
+  const params = new URLSearchParams({
+    Revision: MODELSCOPE_REVISION,
+    FilePath: fileName,
+  });
+  return `https://www.modelscope.cn/api/v1/models/${MODELSCOPE_REPO}/repo?${params}`;
 }
 
 async function readFile(fileUrl: URL): Promise<Blob | Uint8Array | null> {
@@ -223,7 +299,7 @@ function homePage(): string {
         <p class="eyebrow" data-i18n="home.eyebrow">OAR OCR · WebAssembly · Hono</p>
         <h1 data-i18n="home.title">PP-OCRv6 browser OCR</h1>
         <p class="subtitle" data-i18n="home.subtitle">
-          Run text detection and recognition locally in your browser with oar-ocr-wasm, onnxruntime-web, and bundled PP-OCRv6 models.
+          Run text detection and recognition locally in your browser with oar-ocr-wasm, onnxruntime-web, and on-demand PP-OCRv6 models.
         </p>
         <div class="hero-actions">
           <a class="button" href="/ocr" data-i18n="home.start">Start OCR</a>
@@ -270,7 +346,7 @@ function ocrPage(): string {
         <p class="eyebrow" data-i18n="ocr.eyebrow">OAR OCR · WebAssembly</p>
         <h1 data-i18n="ocr.title">Browser OCR recognition</h1>
         <p class="subtitle" data-i18n="ocr.subtitle">
-          Use the bundled oar-ocr-wasm module with onnxruntime-web and PP-OCRv6 tiny/small/medium models directly in your browser.
+          Use oar-ocr-wasm with onnxruntime-web and PP-OCRv6 tiny/small/medium models fetched on demand.
         </p>
       </div>
       <div class="model-card" aria-label="Current model">
@@ -304,9 +380,9 @@ function ocrPage(): string {
     <section class="status card" aria-live="polite">
       <div>
         <span class="status-dot" id="statusDot"></span>
-        <strong id="statusTitle" data-i18n="ocr.initialStatusTitle">Preparing model</strong>
+        <strong id="statusTitle" data-i18n="ocr.initialStatusTitle">Ready for image</strong>
       </div>
-      <p id="statusText" data-i18n="ocr.initialStatusText">The first load downloads the Wasm runtime and the selected model.</p>
+      <p id="statusText" data-i18n="ocr.initialStatusText">Choose an image. The selected model downloads only when OCR starts.</p>
     </section>
 
     <section class="workspace">
