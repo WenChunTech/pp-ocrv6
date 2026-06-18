@@ -149,7 +149,7 @@ const TRANSLATIONS = {
 };
 
 const languageCallbacks = new Set();
-let currentLanguage = normalizeLanguage(localStorage.getItem(STORAGE_KEYS.language) ?? "en");
+let currentLanguage = initialLanguage();
 let currentThemePreference = normalizeThemePreference(
   localStorage.getItem(STORAGE_KEYS.themePreference) ?? migrateLegacyThemePreference(),
 );
@@ -159,9 +159,9 @@ function t(key, values = {}) {
   return template.replace(/\{(\w+)\}/g, (_, name) => String(values[name] ?? ""));
 }
 
-function setLanguage(language) {
+function setLanguage(language, { persist = true } = {}) {
   currentLanguage = normalizeLanguage(language);
-  localStorage.setItem(STORAGE_KEYS.language, currentLanguage);
+  if (persist) localStorage.setItem(STORAGE_KEYS.language, currentLanguage);
   document.documentElement.lang = currentLanguage === "zh" ? "zh-CN" : "en";
 
   document.querySelectorAll("[data-i18n]").forEach((element) => {
@@ -206,6 +206,15 @@ function normalizeLanguage(language) {
   return language === "zh" ? "zh" : "en";
 }
 
+function initialLanguage() {
+  const savedLanguage = localStorage.getItem(STORAGE_KEYS.language);
+  if (savedLanguage) return normalizeLanguage(savedLanguage);
+
+  const browserLanguage = navigator.languages?.[0] ?? navigator.language ?? "en";
+  const primaryLanguage = browserLanguage.toLowerCase().split("-")[0];
+  return primaryLanguage === "zh" ? "zh" : "en";
+}
+
 function migrateLegacyThemePreference() {
   const legacyTheme = localStorage.getItem(STORAGE_KEYS.legacyTheme);
   localStorage.removeItem(STORAGE_KEYS.legacyTheme);
@@ -229,7 +238,7 @@ function initControls() {
   });
 
   setTheme(currentThemePreference);
-  setLanguage(currentLanguage);
+  setLanguage(currentLanguage, { persist: false });
 }
 
 systemThemeQuery?.addEventListener("change", () => {
