@@ -1,0 +1,32 @@
+{
+  "name": "oar-ocr-wasm",
+  "type": "module",
+  "collaborators": [
+    "Wang Xin <xinwang614@gmail.com>"
+  ],
+  "description": "Browser WebAssembly bindings for OAR OCR using onnxruntime-web.",
+  "version": "0.7.1",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/greatv/oar-ocr"
+  },
+  "files": [
+    "oar_ocr_wasm_bg.wasm",
+    "oar_ocr_wasm.js",
+    "oar_ocr_wasm.d.ts"
+  ],
+  "main": "oar_ocr_wasm.js",
+  "homepage": "https://github.com/greatv/oar-ocr",
+  "types": "oar_ocr_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ],
+  "keywords": [
+    "ocr",
+    "wasm",
+    "browser",
+    "onnx",
+    "computer-vision"
+  ]
+}

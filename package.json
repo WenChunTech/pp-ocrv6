@@ -1,0 +1,16 @@
+{
+  "name": "pp-ocrv6",
+  "scripts": {
+    "dev": "bun run --hot src/index.ts",
+    "start": "bun run src/index.ts",
+    "deno:dev": "deno task dev",
+    "deno:start": "deno task start",
+    "check": "deno task check"
+  },
+  "dependencies": {
+    "hono": "^4.12.26"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}
