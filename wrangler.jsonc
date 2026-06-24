@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "ocr",
+  "name": "pp-ocrv6",
   "main": "src/index.ts",
   "compatibility_date": "2025-07-01",
   "assets": {
