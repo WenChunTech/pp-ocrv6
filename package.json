@@ -5,12 +5,16 @@
     "start": "bun run src/index.ts",
     "deno:dev": "deno task dev",
     "deno:start": "deno task start",
-    "check": "deno task check"
+    "check": "deno task check",
+    "cf:dev": "wrangler dev",
+    "cf:deploy": "wrangler deploy",
+    "cf:deploy:dry-run": "wrangler deploy --dry-run"
   },
   "dependencies": {
     "hono": "^4.12.26"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "wrangler": "^4.24.3"
   }
 }

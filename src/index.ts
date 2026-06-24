@@ -3,6 +3,27 @@ import type { Context } from "hono";
 
 type FileBlob = Blob & { exists?: () => Promise<boolean> };
 
+declare global {
+  interface ExecutionContext {
+    waitUntil(promise: Promise<unknown>): void;
+    passThroughOnException(): void;
+  }
+}
+
+interface AssetsBinding {
+  fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+}
+
+interface CloudflareBindings {
+  ASSETS?: AssetsBinding;
+}
+
+type AppEnv = {
+  Bindings: CloudflareBindings;
+};
+
+type AppContext = Context<AppEnv>;
+
 interface RuntimeDeno {
   env?: { get(name: string): string | undefined };
   readFile?: (path: string | URL) => Promise<Uint8Array>;
@@ -22,10 +43,9 @@ const runtime = globalThis as typeof globalThis & {
   Deno?: RuntimeDeno;
 };
 
-const app = new Hono();
-const publicRoot = new URL("../public/", import.meta.url);
-const wasmPkgRoot = new URL("pkg/", publicRoot);
-const projectAssetsRoot = new URL("assets/", import.meta.url);
+const app = new Hono<AppEnv>();
+const wasmPkgRoot = "pkg";
+const projectAssetsRoot = "assets";
 
 const MODELSCOPE_REPO = "greatv/oar-ocr";
 const MODELSCOPE_REVISION = "master";
@@ -68,11 +88,12 @@ app.get("/", (c) => html(c, homePage()));
 app.get("/ocr", (c) => html(c, ocrPage()));
 app.get(
   "/assets/:file",
-  async (c) => serveStaticFile(c, projectAssetsRoot, c.req.param("file")),
+  async (c) =>
+    serveStaticFile(c, projectAssetsRoot, c.req.param("file"), "/assets"),
 );
 app.get(
   "/pkg/:file",
-  async (c) => serveStaticFile(c, wasmPkgRoot, c.req.param("file")),
+  async (c) => serveStaticFile(c, wasmPkgRoot, c.req.param("file"), "/pkg"),
 );
 app.get(
   "/models/:file",
@@ -89,7 +110,11 @@ if (runtime.Deno?.serve && import.meta.main) {
 
 export default {
   port,
-  fetch: app.fetch,
+  fetch: (
+    request: Request,
+    env: CloudflareBindings = {},
+    executionContext?: ExecutionContext,
+  ) => app.fetch(request, env, executionContext),
 };
 
 function readEnv(name: string): string | undefined {
@@ -102,14 +127,15 @@ function readEnv(name: string): string | undefined {
   return runtime.Bun?.env?.[name];
 }
 
-function html(c: Context, body: string): Response {
+function html(c: AppContext, body: string): Response {
   return c.html(renderPage(body));
 }
 
 async function serveStaticFile(
-  c: Context,
-  baseUrl: URL,
+  c: AppContext,
+  basePath: string,
   fileName: string,
+  assetPathPrefix: string,
 ): Promise<Response> {
   fileName = fileName.split("?")[0] ?? fileName;
 
@@ -117,8 +143,14 @@ async function serveStaticFile(
     return c.text("Bad request", 400);
   }
 
-  const fileUrl = new URL(fileName, baseUrl);
-  const file = await readFile(fileUrl);
+  const assetResponse = await serveCloudflareAsset(
+    c,
+    `${assetPathPrefix}/${fileName}`,
+    fileName,
+  );
+  if (assetResponse) return assetResponse;
+
+  const file = await readStaticFile(basePath, fileName);
   if (!file) return c.text("Not found", 404);
 
   return new Response(responseBody(file), {
@@ -129,7 +161,42 @@ async function serveStaticFile(
   });
 }
 
-async function proxyModelFile(c: Context, fileName: string): Promise<Response> {
+async function serveCloudflareAsset(
+  c: AppContext,
+  assetPath: string,
+  fileName: string,
+): Promise<Response | null> {
+  const assets = c.env?.ASSETS;
+  if (!assets) return null;
+
+  const assetUrl = new URL(c.req.url);
+  assetUrl.pathname = assetPath;
+  assetUrl.search = "";
+
+  const assetResponse = await assets.fetch(assetUrl, {
+    method: "GET",
+    headers: c.req.raw.headers,
+  });
+
+  if (assetResponse.status === 404) {
+    return new Response("Not found", { status: 404 });
+  }
+
+  const headers = new Headers(assetResponse.headers);
+  headers.set("content-type", contentType(fileName));
+  headers.set("cache-control", cacheControl(fileName, c.req.url));
+
+  return new Response(assetResponse.body, {
+    status: assetResponse.status,
+    statusText: assetResponse.statusText,
+    headers,
+  });
+}
+
+async function proxyModelFile(
+  c: AppContext,
+  fileName: string,
+): Promise<Response> {
   fileName = fileName.split("?")[0] ?? fileName;
 
   if (!isSafeStaticFileName(fileName)) {
@@ -169,7 +236,11 @@ function modelScopeFileUrl(fileName: string): string {
   return `https://www.modelscope.cn/api/v1/models/${MODELSCOPE_REPO}/repo?${params}`;
 }
 
-async function readFile(fileUrl: URL): Promise<Blob | Uint8Array | null> {
+async function readStaticFile(
+  basePath: string,
+  fileName: string,
+): Promise<Blob | Uint8Array | null> {
+  const fileUrl = new URL(`../public/${basePath}/${fileName}`, import.meta.url);
   const bunFile = runtime.Bun?.file?.(fileUrl);
   if (bunFile) {
     if (bunFile.exists && !(await bunFile.exists())) return null;
